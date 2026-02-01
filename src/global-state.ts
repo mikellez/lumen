@@ -17,6 +17,7 @@ import {
 } from "./schema"
 import { fs } from "./utils/fs"
 import {
+  getLegacyRemoteOriginUrl,
   getRemoteOriginUrl,
   getRepoDir,
   gitAdd,
@@ -27,6 +28,7 @@ import {
   gitRemove,
   isRepoCloned,
   isRepoSynced,
+  listCachedRepos,
 } from "./utils/git"
 import { parseNote } from "./utils/parse-note"
 import { removeTemplateFrontmatter } from "./utils/remove-template-frontmatter"
@@ -334,12 +336,21 @@ function createGlobalStateMachine() {
         resolveRepo: async () => {
           const stopTimer = startTimer("resolveRepo()")
 
-          const remoteOriginUrl = await getRemoteOriginUrl({ owner: "legacy", name: "repo" }).catch(
-            () => undefined,
-          )
+          const cachedRepos = await listCachedRepos()
 
-          if (remoteOriginUrl) {
-            const repo = String(remoteOriginUrl).replace(/^https:\/\/github.com\//, "")
+          if (cachedRepos.length > 0) {
+            const githubRepo = cachedRepos[0]
+            const repoDir = getRepoDir(githubRepo)
+            const markdownFiles =
+              getMarkdownFilesFromLocalStorage() ?? (await getMarkdownFilesFromFs(repoDir))
+            stopTimer()
+            return { githubRepo, markdownFiles }
+          }
+
+          const legacyRemoteUrl = await getLegacyRemoteOriginUrl()
+
+          if (legacyRemoteUrl) {
+            const repo = String(legacyRemoteUrl).replace(/^https:\/\/github.com\//, "")
             const [owner, name] = repo.split("/")
 
             if (owner && name) {

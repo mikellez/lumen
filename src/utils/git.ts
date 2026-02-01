@@ -204,6 +204,19 @@ export async function getRemoteOriginUrl(repo: GitHubRepository): Promise<string
   return remoteOriginUrl
 }
 
+export async function getLegacyRemoteOriginUrl(): Promise<string | undefined> {
+  try {
+    const remoteOriginUrl = await git.getConfig({
+      fs,
+      dir: REPO_DIR,
+      path: "remote.origin.url",
+    })
+    return remoteOriginUrl
+  } catch {
+    return undefined
+  }
+}
+
 export async function removeCachedRepo(repo: GitHubRepository): Promise<boolean> {
   const repoDir = getRepoDir(repo)
   try {
