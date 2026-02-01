@@ -4,7 +4,7 @@ import { useNetworkState } from "react-use"
 import { ErrorIcon16, LoadingIcon16, OfflineIcon16 } from "../components/icons"
 import { githubRepoAtom, githubUserAtom } from "../global-state"
 import { getFileUrl, readFile } from "../utils/fs"
-import { REPO_DIR } from "../utils/git"
+import { getRepoDir } from "../utils/git"
 
 export const fileCache = new Map<string, { file: File; url: string }>()
 
@@ -34,7 +34,8 @@ export function FilePreview({ path, alt = "", width, height }: FilePreviewProps)
       try {
         setIsLoading(true)
 
-        const file = await readFile(`${REPO_DIR}${path}`)
+        const repoDir = getRepoDir(githubRepo)
+        const file = await readFile(`${repoDir}${path}`)
         const url = await getFileUrl({ file, path, githubUser, githubRepo })
 
         setFile(file)

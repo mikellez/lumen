@@ -15,16 +15,17 @@ import {
   githubUserSchema,
   templateSchema,
 } from "./schema"
-import { fs, fsWipe } from "./utils/fs"
+import { fs } from "./utils/fs"
 import {
-  REPO_DIR,
   getRemoteOriginUrl,
+  getRepoDir,
   gitAdd,
   gitClone,
   gitCommit,
   gitPull,
   gitPush,
   gitRemove,
+  isRepoCloned,
   isRepoSynced,
 } from "./utils/git"
 import { parseNote } from "./utils/parse-note"
@@ -122,7 +123,6 @@ function createGlobalStateMachine() {
             "clearGitHubUser",
             "clearGitHubUserLocalStorage",
             "clearMarkdownFilesLocalStorage",
-            "clearFileSystem",
             "setSampleMarkdownFiles",
           ],
           exit: ["clearMarkdownFiles"],
@@ -334,120 +334,117 @@ function createGlobalStateMachine() {
         resolveRepo: async () => {
           const stopTimer = startTimer("resolveRepo()")
 
-          const remoteOriginUrl = await getRemoteOriginUrl()
+          const remoteOriginUrl = await getRemoteOriginUrl({ owner: "legacy", name: "repo" }).catch(
+            () => undefined,
+          )
 
-          // Remove https://github.com/ from the beginning of the URL to get the repo name
-          const repo = String(remoteOriginUrl).replace(/^https:\/\/github.com\//, "")
+          if (remoteOriginUrl) {
+            const repo = String(remoteOriginUrl).replace(/^https:\/\/github.com\//, "")
+            const [owner, name] = repo.split("/")
 
-          const [owner, name] = repo.split("/")
-
-          if (!owner || !name) {
-            throw new Error("Invalid repo")
+            if (owner && name) {
+              const githubRepo = { owner, name }
+              const repoDir = getRepoDir(githubRepo)
+              const markdownFiles =
+                getMarkdownFilesFromLocalStorage() ?? (await getMarkdownFilesFromFs(repoDir))
+              stopTimer()
+              return { githubRepo, markdownFiles }
+            }
           }
 
-          const githubRepo = { owner, name }
-
-          const markdownFiles =
-            getMarkdownFilesFromLocalStorage() ?? (await getMarkdownFilesFromFs(REPO_DIR))
-
-          stopTimer()
-
-          return { githubRepo, markdownFiles }
+          throw new Error("No repo found")
         },
         cloneRepo: async (context, event) => {
           if (!context.githubUser) throw new Error("Not signed in")
 
-          await gitClone(event.githubRepo, context.githubUser)
+          const repoAlreadyCloned = await isRepoCloned(event.githubRepo)
+          const repoDir = getRepoDir(event.githubRepo)
+
+          if (repoAlreadyCloned) {
+            await gitPull(event.githubRepo, context.githubUser)
+          } else {
+            await gitClone(event.githubRepo, context.githubUser)
+          }
 
           return {
-            markdownFiles: await getMarkdownFilesFromFs(REPO_DIR),
+            markdownFiles: await getMarkdownFilesFromFs(repoDir),
           }
         },
         pull: async (context) => {
-          if (!context.githubUser) throw new Error("Not signed in")
+          if (!context.githubUser || !context.githubRepo) throw new Error("Not signed in")
 
-          await gitPull(context.githubUser)
+          await gitPull(context.githubRepo, context.githubUser)
+          const repoDir = getRepoDir(context.githubRepo)
 
           return {
-            markdownFiles: await getMarkdownFilesFromFs(REPO_DIR),
+            markdownFiles: await getMarkdownFilesFromFs(repoDir),
           }
         },
         push: async (context) => {
-          if (!context.githubUser) throw new Error("Not signed in")
+          if (!context.githubUser || !context.githubRepo) throw new Error("Not signed in")
 
-          await gitPush(context.githubUser)
+          await gitPush(context.githubRepo, context.githubUser)
         },
-        checkStatus: async () => {
-          return { isSynced: await isRepoSynced() }
+        checkStatus: async (context) => {
+          if (!context.githubRepo) return { isSynced: true }
+          return { isSynced: await isRepoSynced(context.githubRepo) }
         },
         writeFiles: async (context, event) => {
-          if (!context.githubUser) throw new Error("Not signed in")
+          if (!context.githubUser || !context.githubRepo) throw new Error("Not signed in")
 
+          const repoDir = getRepoDir(context.githubRepo)
           const entries = Object.entries(event.markdownFiles)
           const filesToWrite = entries.filter(([, content]) => content !== null)
           const filesToDelete = entries.filter(([, content]) => content === null)
           const fileList = entries.map(([filepath]) => filepath)
           const commitMessage = event.commitMessage ?? `Update ${fileList.join(" ") || "notes"}`
 
-          // Write files to file system
           for (const [filepath, content] of filesToWrite) {
             if (content === null) continue
 
-            // Create directories if needed
             const dirPath = filepath.split("/").slice(0, -1).join("/")
             if (dirPath) {
-              let currentPath = REPO_DIR
+              let currentPath = repoDir
               const segments = dirPath.split("/")
 
               for (const segment of segments) {
                 currentPath = `${currentPath}/${segment}`
                 const stats = await fs.promises.stat(currentPath).catch(() => null)
-                const exists = stats !== null
-                if (!exists) {
+                if (!stats) {
                   await fs.promises.mkdir(currentPath)
                 }
               }
             }
 
-            // Write file
-            await fs.promises.writeFile(`${REPO_DIR}/${filepath}`, content, "utf8")
+            await fs.promises.writeFile(`${repoDir}/${filepath}`, content, "utf8")
           }
 
-          // Delete files from file system
           for (const [filepath] of filesToDelete) {
-            await fs.promises.unlink(`${REPO_DIR}/${filepath}`).catch(() => null)
+            await fs.promises.unlink(`${repoDir}/${filepath}`).catch(() => null)
           }
 
-          // Stage files
           const filesToAdd = filesToWrite.map(([filepath]) => filepath)
           if (filesToAdd.length > 0) {
-            await gitAdd(filesToAdd)
+            await gitAdd(context.githubRepo, filesToAdd)
           }
 
           for (const [filepath] of filesToDelete) {
             try {
-              await gitRemove(filepath)
-            } catch {
-              // Ignore if the file isn't tracked
-            }
+              await gitRemove(context.githubRepo, filepath)
+            } catch {}
           }
 
-          // Commit files
-          await gitCommit(commitMessage)
+          await gitCommit(context.githubRepo, commitMessage)
         },
         deleteFile: async (context, event) => {
-          if (!context.githubUser) throw new Error("Not signed in")
+          if (!context.githubUser || !context.githubRepo) throw new Error("Not signed in")
 
           const { filepath } = event
+          const repoDir = getRepoDir(context.githubRepo)
 
-          // Delete file from file system
-          await fs.promises.unlink(`${REPO_DIR}/${filepath}`)
-
-          // Stage deletion
-          await gitRemove(filepath)
-
-          // Commit deletion
-          await gitCommit(`Delete ${filepath}`)
+          await fs.promises.unlink(`${repoDir}/${filepath}`)
+          await gitRemove(context.githubRepo, filepath)
+          await gitCommit(context.githubRepo, `Delete ${filepath}`)
         },
       },
       actions: {
@@ -492,9 +489,6 @@ function createGlobalStateMachine() {
         clearGitHubRepo: assign({
           githubRepo: null,
         }),
-        clearFileSystem: () => {
-          fsWipe()
-        },
         setMarkdownFiles: assign({
           markdownFiles: (_, event) => event.data.markdownFiles,
         }),

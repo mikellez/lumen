@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
-import { useAtom, useAtomValue } from "jotai"
-import { useState } from "react"
+import { useAtom, useAtomValue, useSetAtom } from "jotai"
+import { useState, useEffect } from "react"
 import { useNetworkState } from "react-use"
 import { Button } from "../components/button"
 import { useSignOut } from "../components/github-auth"
@@ -15,6 +15,7 @@ import {
   epaperAtom,
   githubRepoAtom,
   githubUserAtom,
+  globalStateMachineAtom,
   hasOpenAIKeyAtom,
   isCloningRepoAtom,
   isRepoClonedAtom,
@@ -23,6 +24,7 @@ import {
   voiceAssistantEnabledAtom,
 } from "../global-state"
 import { cx } from "../utils/cx"
+import { getCachedRepoSize, listCachedRepos, removeCachedRepo } from "../utils/git"
 
 export const Route = createFileRoute("/_appRoot/settings")({
   component: RouteComponent,
@@ -80,6 +82,14 @@ function SettingsSection({ title, children }: { title: string; children: React.R
   )
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B"
+  const k = 1024
+  const sizes = ["B", "KB", "MB", "GB"]
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
+}
+
 function GitHubSection() {
   const navigate = useNavigate()
   const githubUser = useAtomValue(githubUserAtom)
@@ -87,9 +97,42 @@ function GitHubSection() {
   const isRepoNotCloned = useAtomValue(isRepoNotClonedAtom)
   const isCloningRepo = useAtomValue(isCloningRepoAtom)
   const isRepoCloned = useAtomValue(isRepoClonedAtom)
+  const send = useSetAtom(globalStateMachineAtom)
   const signOut = useSignOut()
   const { online } = useNetworkState()
   const [isEditingRepo, setIsEditingRepo] = useState(false)
+  const [cachedRepos, setCachedRepos] = useState<{ owner: string; name: string }[]>([])
+  const [repoSizes, setRepoSizes] = useState<Record<string, number>>({})
+
+  useEffect(() => {
+    if (githubUser) {
+      listCachedRepos().then((repos) => {
+        setCachedRepos(repos)
+        repos.forEach((repo) => {
+          getCachedRepoSize(repo).then((size) => {
+            setRepoSizes((prev) => ({ ...prev, [`${repo.owner}/${repo.name}`]: size }))
+          })
+        })
+      })
+    }
+  }, [githubUser, githubRepo])
+
+  const handleRemoveRepo = async (repo: { owner: string; name: string }, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (
+      confirm(
+        `Remove cached copy of ${repo.owner}/${repo.name}? This will delete the local copy but not affect the remote repository.`,
+      )
+    ) {
+      await removeCachedRepo(repo)
+      setCachedRepos((prev) => prev.filter((r) => r.owner !== repo.owner || r.name !== repo.name))
+      setRepoSizes((prev) => {
+        const next = { ...prev }
+        delete next[`${repo.owner}/${repo.name}`]
+        return next
+      })
+    }
+  }
 
   if (!githubUser) {
     return (
@@ -98,6 +141,12 @@ function GitHubSection() {
       </SettingsSection>
     )
   }
+
+  const otherCachedRepos = cachedRepos.filter(
+    (repo) => repo.owner !== githubRepo?.owner || repo.name !== githubRepo?.name,
+  )
+
+  const totalCachedSize = Object.values(repoSizes).reduce((sum, size) => sum + size, 0)
 
   return (
     <SettingsSection title="GitHub">
@@ -129,25 +178,71 @@ function GitHubSection() {
         {isCloningRepo && githubRepo ? (
           <div className="flex items-center gap-2 leading-4 text-text-secondary">
             <LoadingIcon16 />
-            Cloning {githubRepo.owner}/{githubRepo.name}…
+            Switching to {githubRepo.owner}/{githubRepo.name}…
           </div>
         ) : null}
         {isRepoCloned && !isEditingRepo && githubRepo ? (
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex w-0 grow flex-col items-start gap-1">
-              <span className="text-sm leading-4 text-text-secondary">Repository</span>
-              <a
-                href={`https://github.com/${githubRepo.owner}/${githubRepo.name}`}
-                className="link leading-5"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                {githubRepo.owner}/{githubRepo.name}
-              </a>
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex w-0 grow flex-col items-start gap-1">
+                <span className="text-sm leading-4 text-text-secondary">Repository</span>
+                <a
+                  href={`https://github.com/${githubRepo.owner}/${githubRepo.name}`}
+                  className="link leading-5"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {githubRepo.owner}/{githubRepo.name}
+                </a>
+              </div>
+              <Button className="shrink-0" onClick={() => setIsEditingRepo(true)}>
+                Connect other
+              </Button>
             </div>
-            <Button className="shrink-0" onClick={() => setIsEditingRepo(true)}>
-              Change
-            </Button>
+
+            {otherCachedRepos.length > 0 && (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm leading-4 text-text-secondary">
+                    Cached repositories ({otherCachedRepos.length})
+                  </span>
+                  {totalCachedSize > 0 && (
+                    <span className="text-xs text-text-tertiary">
+                      Total: {formatBytes(totalCachedSize)}
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-col gap-1">
+                  {otherCachedRepos.map((repo) => (
+                    <div
+                      key={`${repo.owner}/${repo.name}`}
+                      className="group flex items-center justify-between gap-2 rounded px-2 py-1.5 hover:bg-bg-secondary"
+                    >
+                      <button
+                        onClick={() => send({ type: "SELECT_REPO", githubRepo: repo })}
+                        className="flex w-0 grow items-center justify-between gap-2 text-left"
+                      >
+                        <span className="truncate">
+                          {repo.owner}/{repo.name}
+                        </span>
+                        <span className="text-xs text-text-tertiary shrink-0">
+                          {repoSizes[`${repo.owner}/${repo.name}`]
+                            ? formatBytes(repoSizes[`${repo.owner}/${repo.name}`])
+                            : "..."}
+                        </span>
+                      </button>
+                      <button
+                        onClick={(e) => handleRemoveRepo(repo, e)}
+                        className="opacity-0 group-hover:opacity-100 text-text-tertiary hover:text-text-danger px-2"
+                        title="Remove cached copy"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ) : null}
       </div>

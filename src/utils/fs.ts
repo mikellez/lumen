@@ -7,12 +7,9 @@ import {
   resolveGitLfsPointer,
   uploadToGitLfsServer,
 } from "./git-lfs"
-import { REPO_DIR } from "./git"
 
 const DB_NAME = "fs"
 
-// TODO: Investigate memfs + OPFS as a more performant alternative to lightning-fs + IndexedDB
-// Reference: https://github.com/streamich/memfs/tree/c8bfa38aa15f1d3c9f326e9c25c8972326193a26/demo/git-opfs
 export const fs = new LightningFS(DB_NAME)
 
 /** Delete file system database */
@@ -49,8 +46,7 @@ export async function getFileUrl({
   githubUser: GitHubUser
   githubRepo: GitHubRepository
 }) {
-  // If file is tracked with Git LFS, resolve the pointer
-  if (await isTrackedWithGitLfs(path)) {
+  if (await isTrackedWithGitLfs(githubRepo, path)) {
     return await resolveGitLfsPointer({ file, githubUser, githubRepo })
   } else {
     return URL.createObjectURL(file)
@@ -69,37 +65,29 @@ export async function writeFile({
   githubUser: GitHubUser
   githubRepo: GitHubRepository
 }) {
-  if (await isTrackedWithGitLfs(path)) {
+  if (await isTrackedWithGitLfs(githubRepo, path)) {
     await uploadToGitLfsServer({ content, githubUser, githubRepo })
 
-    // Write a Git LFS pointer to the file system
     const pointer = await createGitLfsPointer(content)
     await fs.promises.writeFile(path, pointer)
   } else {
-    // TODO: Test this
     await fs.promises.writeFile(path, Buffer.from(content))
   }
 }
 
-/** Log the state of the file system to the console */
-export async function fsDebug(fs: LightningFS, dir = REPO_DIR) {
+export async function fsDebug(fs: LightningFS, dir = "/") {
   try {
-    // List files and directories at the specified path
     const files = await fs.promises.readdir(dir)
 
     console.log(`Contents of ${dir}:`, files)
 
-    // Iterate over each file/directory
     for (const file of files) {
-      // Ensure there is a slash between the directory and file names
       const filePath = `${dir}/${file}`
 
       const stats = await fs.promises.stat(filePath)
       if (stats.isDirectory()) {
-        // If directory, recursively log its contents
         await fsDebug(fs, `${filePath}/`)
       } else {
-        // If file, read and log its contents
         const content = await fs.promises.readFile(filePath, "utf8")
         console.log(`Contents of ${filePath}:`, content)
       }
